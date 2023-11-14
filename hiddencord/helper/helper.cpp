@@ -1,5 +1,8 @@
 #include "pch.h"
 #include "helper.h"
+#include <Shlwapi.h>
+
+#pragma comment(lib, "Shlwapi.lib")
 
 DWORD helper::get_process_id(const char* process_name)
 {

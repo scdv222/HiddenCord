@@ -1,9 +1,6 @@
 #include "pch.h"
 #include "helper/helper.h"
 
-typedef BOOL(WINAPI* LPFN_SWDA)(HWND, DWORD);
-LPFN_SWDA pSetWindowDisplayAffinity;
-
 int main()
 {
     std::cout << "[-] Initializing.." << std::endl;
@@ -22,9 +19,9 @@ int main()
     if (h_proc && h_proc != INVALID_HANDLE_VALUE)
     {
         std::cout << "[-] Opened handle to Discord" << std::endl;
-        std::cout << "[-] Trying to hook Discord.." << std::endl;
+        std::cout << "[-] Allocating memory in process" << std::endl;
 
-        // Allocate memory for code
+        // Allocate memory for shellcode
         void* loc = VirtualAllocEx(h_proc, 0, MAX_PATH, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
         if (loc == NULL)
         {
@@ -32,7 +29,12 @@ int main()
             return 1;
         }
 
-        // Handle to user32 to fetch address of SWDA
+        unsigned char shellcode[] = {
+            0x6A, 0x11, 0x8B, 0x44, 0x24, 0x08, 0x50, 0xE8, 0x0, 0x0, 0x0, 0x0, 0x31, 0xC0, 0xC2, 0x04, 0x00
+        };
+
+        std::cout << "[-] Calculating relative offset to SetWindowDisplayAffinity" << std::endl;
+
         HMODULE h_user32 = GetModuleHandle("user32.dll");
         if (h_user32 == NULL)
         {
@@ -40,18 +42,27 @@ int main()
             return 1;
         }
 
-        // Fetch address of SWDA
-        pSetWindowDisplayAffinity = (LPFN_SWDA)GetProcAddress(h_user32, "SetWindowDisplayAffinity");
-        if (pSetWindowDisplayAffinity == NULL)
+        uintptr_t swda_addr = (uintptr_t)GetProcAddress(h_user32, "SetWindowDisplayAffinity");
+        if (swda_addr == NULL)
         {
             std::cout << "[!] Failed to find SetWindowDisplayAffinity!" << std::endl;
             return 1;
         }
-       
-        HWND hwnd_discord = NULL;
-        DWORD affinity = WDA_EXCLUDEFROMCAPTURE;
+
+        // Get relative offset from call instruction to function address
+        uintptr_t call = (uintptr_t)loc + 7;
+        DWORD relative = (DWORD)swda_addr - (DWORD)call - 5;
+
+        std::cout << "[-] Getting shellcode ready.." << std::endl;
+
+        // Patch shellcode with relative
+        *(DWORD*)(shellcode + 8) = relative;
+
+        // Write shellcode to allocated memory
+        WriteProcessMemory(h_proc, loc, shellcode, sizeof(shellcode), 0);
 
         // Fetch window handle of Discord
+        HWND hwnd_discord = NULL;
         EnumWindows(helper::EnumWindowsProc, (LPARAM)&hwnd_discord);
         if (hwnd_discord == NULL)
         {
@@ -59,40 +70,25 @@ int main()
             return 1;
         }
 
-        // Write window handle to memory
-        if (!WriteProcessMemory(h_proc, loc, &hwnd_discord, sizeof(hwnd_discord), NULL))
-        {
-            std::cout << "[!] Failed to write window handle to memory!" << std::endl;
-            return 1;
-        }
-
-        // Write affinity value to memory
-        if (!WriteProcessMemory(h_proc, (BYTE*)loc + sizeof(hwnd_discord), &affinity, sizeof(affinity), NULL))
-        {
-            std::cout << "[!] Failed to write affinity value to memory!" << std::endl;
-            return 1;
-        }
-
-        // Execute SWDA and point it to allocated memory for arguments
-        DWORD thread_id;
-        HANDLE h_thread = CreateRemoteThread(h_proc, NULL, 0, (LPTHREAD_START_ROUTINE)pSetWindowDisplayAffinity, loc, 0, &thread_id);
-        if (h_thread == INVALID_HANDLE_VALUE)
-        {
-            std::cout << "[!] Couldn't create thread to Discord!" << std::endl;
-            return 1;
-        }
-
-        std::cout << "[-] Finalizing.." << std::endl;
-        WaitForSingleObject(h_thread, INFINITE);
+        // Create remote thread and call shellcode pushing window handle onto stack
+        std::cout << "[-] Starting remote thread.." << std::endl;
+        HANDLE h_thread = CreateRemoteThread(h_proc, 0, 0, (LPTHREAD_START_ROUTINE)loc, hwnd_discord, 0, 0);
+        Sleep(100);
 
         std::cout << "[-] Success! Cleaning up.." << std::endl;
-        CloseHandle(h_thread);
-        VirtualFreeEx(h_proc, loc, 0, MEM_RELEASE);
-        CloseHandle(h_proc);
-
-        std::cout << "[-] Execution complete, close window when you are ready..";
-        std::cin.get();
+        if (h_thread)
+        {
+            CloseHandle(h_thread);
+        }
     }
+
+    if (h_proc)
+    {
+        CloseHandle(h_proc);
+    };
+
+    std::cout << "[-] Finished! Press enter to close the window!" << std::endl;
+    std::cin.get();
 
     return 0;
 }
