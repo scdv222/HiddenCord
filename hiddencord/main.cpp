@@ -3,6 +3,18 @@
 
 int main()
 {
+    unsigned char shellcode[] = {
+    0x55, //push ebp
+    0x8B, 0xEC, //mov ebp, esp
+    0x6A, 0x11, //push 11
+    0x8B, 0x45, 0x08, //mov eax, [ebp+8]
+    0x50, //push eax
+    0xE8, 0x00, 0x00, 0x00, 0x00, //call SetWindowDisplayAffinity
+    //0xB8, 0x04, 0x00, 0x00, 0x00, //mov eax, 4
+    0x5D, //pop ebp
+    0xC2, 0x04, 0x00 //ret 4
+    };
+
     std::cout << "[-] Initializing.." << std::endl;
 
     DWORD proc_id = 0;
@@ -22,16 +34,12 @@ int main()
         std::cout << "[-] Allocating memory in process" << std::endl;
 
         // Allocate memory for shellcode
-        void* loc = VirtualAllocEx(h_proc, 0, MAX_PATH, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        void* loc = VirtualAllocEx(h_proc, 0, MAX_PATH, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
         if (loc == NULL)
         {
             std::cout << "[!] Failed to allocate memory in process!" << std::endl;
             return 1;
         }
-
-        unsigned char shellcode[] = {
-            0x6A, 0x11, 0x8B, 0x44, 0x24, 0x08, 0x50, 0xE8, 0x0, 0x0, 0x0, 0x0, 0x31, 0xC0, 0xC2, 0x04, 0x00
-        };
 
         std::cout << "[-] Calculating relative offset to SetWindowDisplayAffinity" << std::endl;
 
@@ -42,26 +50,13 @@ int main()
             return 1;
         }
 
-        uintptr_t swda_addr = (uintptr_t)GetProcAddress(h_user32, "SetWindowDisplayAffinity");
+        DWORD swda_addr = (DWORD)GetProcAddress(h_user32, "SetWindowDisplayAffinity");
         if (swda_addr == NULL)
         {
             std::cout << "[!] Failed to find SetWindowDisplayAffinity!" << std::endl;
             return 1;
         }
 
-        // Get relative offset from call instruction to function address
-        uintptr_t call = (uintptr_t)loc + 7;
-        DWORD relative = (DWORD)swda_addr - (DWORD)call - 5;
-
-        std::cout << "[-] Getting shellcode ready.." << std::endl;
-
-        // Patch shellcode with relative
-        *(DWORD*)(shellcode + 8) = relative;
-
-        // Write shellcode to allocated memory
-        WriteProcessMemory(h_proc, loc, shellcode, sizeof(shellcode), 0);
-
-        // Fetch window handle of Discord
         HWND hwnd_discord = NULL;
         EnumWindows(helper::EnumWindowsProc, (LPARAM)&hwnd_discord);
         if (hwnd_discord == NULL)
@@ -70,25 +65,40 @@ int main()
             return 1;
         }
 
-        // Create remote thread and call shellcode pushing window handle onto stack
-        std::cout << "[-] Starting remote thread.." << std::endl;
-        HANDLE h_thread = CreateRemoteThread(h_proc, 0, 0, (LPTHREAD_START_ROUTINE)loc, hwnd_discord, 0, 0);
-        Sleep(100);
+        std::cout << "[-] Found Discord window: " << hwnd_discord << std::endl;
 
-        std::cout << "[-] Success! Cleaning up.." << std::endl;
-        if (h_thread)
+        // Put offset in little endian in our byte
+        DWORD offset = swda_addr - (DWORD)loc + 9 - 23;
+        memcpy(&shellcode[10], &offset, 4);
+
+
+        std::cout << "[-] Writing shellcode to process memory" << std::endl;
+        if (!WriteProcessMemory(h_proc, loc, shellcode, sizeof(shellcode), 0))
         {
-            CloseHandle(h_thread);
+            std::cout << "[!] Failed to write to process memory!" << std::endl;
+            return 1;
         }
-    }
 
-    if (h_proc)
-    {
+        std::cout << "[-] Creating remote thread at " << (DWORD)loc << std::endl;
+        system("pause");
+        HANDLE h_thread = CreateRemoteThread(h_proc, 0, 0, (LPTHREAD_START_ROUTINE)loc, hwnd_discord, 0, 0);
+        if (h_thread == NULL)
+        {
+            std::cout << "[!] Failed to create remote thread!" << std::endl;
+            return 1;
+        }
+        std::cout << "[-] Waiting for thread to finish" << std::endl;
+        WaitForSingleObject(h_thread, INFINITE);
+        std::cout << "[-] Cleaning up" << std::endl;
+        VirtualFreeEx(h_proc, loc, 0, MEM_RELEASE);
+        CloseHandle(h_thread);
         CloseHandle(h_proc);
-    };
-
-    std::cout << "[-] Finished! Press enter to close the window!" << std::endl;
-    std::cin.get();
-
+    }
+    else
+    {
+        std::cout << "[!] Failed to open handle to process!" << std::endl;
+        return 1;
+    }
+    std::cout << "[-] Done!" << std::endl;
     return 0;
 }
